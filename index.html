@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Решись Авиа — прогноз продаж</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f3f6fb;color:#1c2733}
+.wrap{max-width:760px;margin:0 auto;padding:16px}h1{font-size:22px;margin:8px 0 2px}.sub{color:#5b6b7b;margin:0 0 14px;font-size:14px}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:560px){.grid{grid-template-columns:1fr}}
+label{display:block;font-size:13px;color:#43515f;margin-bottom:4px}
+select,input{width:100%;padding:10px;font-size:15px;border:1px solid #c5d0dc;border-radius:8px;background:#fff}
+button{margin-top:14px;width:100%;padding:12px;font-size:16px;font-weight:bold;color:#fff;background:#0b6bcb;border:0;border-radius:8px;cursor:pointer}
+button:hover{background:#0958a8}.hint{font-size:12px;color:#6b7a89;margin-top:3px}
+.err{background:#fdecea;color:#a12622;padding:10px;border-radius:8px;margin-top:12px;font-size:14px}
+.status{font-size:13px;color:#5b6b7b;margin-bottom:10px}.status.bad{color:#a12622}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}@media(max-width:560px){.kpis{grid-template-columns:1fr}}
+.kpi{background:#f3f6fb;border-radius:10px;padding:12px;text-align:center}.kpi b{display:block;font-size:26px;color:#0b6bcb}.kpi span{font-size:12px;color:#5b6b7b}
+.kpi.warn b{color:#c0392b}table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+th,td{padding:5px 8px;border-bottom:1px solid #e3e9f0;text-align:right}th:first-child,td:first-child{text-align:left}
+.note{font-size:13px;color:#43515f;margin:8px 0 0}svg{width:100%;height:auto;display:block}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Решись Авиа: прогноз продаж билетов</h1>
+<p class="sub">Выберите рейс, дату и цену — получите число мест и прогноз продаж.</p>
+
+<div class="card">
+  <div id="status" class="status">Загрузка данных…</div>
+  <div id="filepick" class="hidden"><label>Файл прогноза (seasonal_forecast.csv или my_forecast.csv)</label><input type="file" id="file" accept=".csv"><div class="hint">Автозагрузка не сработала — выберите файл вручную.</div></div>
+  <form id="f" onsubmit="return false">
+  <div class="grid">
+    <div><label for="from">Откуда</label><select id="from"><option value="MOW">Москва</option></select></div>
+    <div><label for="to">Куда</label><select id="to"></select></div>
+    <div><label for="date">Дата вылета</label><input type="date" id="date" min="2026-06-01" max="2026-07-01" value="2026-06-15"></div>
+    <div><label for="price">Цена билета, ₽</label><input type="number" id="price" step="1"><div class="hint" id="pricehint"></div></div>
+  </div>
+  <button id="go" type="button">Рассчитать</button>
+  </form>
+  <div id="err" class="err hidden"></div>
+</div>
+
+<div id="res" class="card hidden">
+  <div class="kpis">
+    <div class="kpi"><b id="kSeats">–</b><span>мест в самолёте</span></div>
+    <div class="kpi"><b id="kWish">–</b><span>желающих купить (медиана)</span></div>
+    <div class="kpi" id="kSalesBox"><b id="kSales">–</b><span>прогноз продаж</span></div>
+  </div>
+  <p class="note" id="note"></p>
+  <h3 style="margin:14px 0 4px;font-size:16px">Распределение спроса при этой цене</h3>
+  <div id="chart"></div>
+  <p class="note">Каждый столбец — 10% вероятности (между соседними квантилями прогноза). Узкий высокий столбец — спрос на этом уровне вероятен; красная зона — спрос выше числа мест, продажи упираются в seats. Бледные крайние столбцы — «хвосты» (оценка).</p>
+  <table id="tbl"></table>
+</div>
+</div>
+<script>
+var ROUTES={
+ 'MOW-AER':{city:'Сочи',base:9000,sens:0.141,min:5400,max:18000},
+ 'MOW-LED':{city:'Санкт-Петербург',base:5500,sens:0.294,min:3300,max:11000},
+ 'MOW-KGD':{city:'Калининград',base:7500,sens:0.0957,min:4500,max:15000},
+ 'MOW-OVB':{city:'Новосибирск',base:12000,sens:0.0312,min:7200,max:24000},
+ 'MOW-MRV':{city:'Минеральные Воды',base:8000,sens:0.0653,min:4800,max:16000}
+};
+var GIST='https://gist.githubusercontent.com/Murkat-git/3ddc868889d3e0d37542d786c8b1aa74/raw/seasonal_forecast.csv';
+var DATA={};
+
+/* ---------- расчёт (та же формула, что в задании) ---------- */
+function wishFor(row,q,route,price){return row[q+'_base_demand']-route.sens*(price-route.base);}
+function forecast(row,route,price){
+  var w=[];for(var i=1;i<=9;i++)w.push(wishFor(row,'0.'+i,route,price));
+  var wish=w[4];
+  return {seats:row.seats,wish:wish,sales:Math.min(row.seats,Math.max(0,wish)),w:w};
+}
+function parseCSV(text){
+  var L=text.trim().split(/\r?\n/),h=L[0].split(','),out={};
+  for(var i=1;i<L.length;i++){var c=L[i].split(',');if(c.length<h.length)continue;
+    var r={};for(var j=0;j<h.length;j++)r[h[j]]=j<2?c[j]:parseFloat(c[j]);
+    out[r.route+'|'+r.date]=r;}
+  return out;
+}
+/* вероятность, что спрос выше x: кусочно-линейная CDF по 9 квантилям */
+function probAbove(w,x){
+  var lo=w[0]-(w[1]-w[0]),hi=w[8]+(w[8]-w[7]),p=[lo].concat(w,[hi]),cp=[0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1];
+  if(x<=lo)return 1;if(x>=hi)return 0;
+  for(var i=0;i<10;i++){if(x<=p[i+1]){var t=(x-p[i])/(p[i+1]-p[i]);return 1-(cp[i]+t*(cp[i+1]-cp[i]));}}
+  return 0;
+}
+
+/* ---------- интерфейс ---------- */
+var $=function(id){return document.getElementById(id)};
+function fmt(n){return Math.round(n).toLocaleString('ru-RU');}
+function setData(d,src){DATA=d;var n=Object.keys(d).length;$('status').className='status';$('status').textContent='Данные загружены ('+src+'): '+n+' рейсов.';$('filepick').classList.add('hidden');}
+function loadData(){
+  fetch('seasonal_forecast.csv').then(function(r){if(!r.ok)throw 0;return r.text();})
+  .then(function(t){setData(parseCSV(t),'seasonal_forecast.csv');})
+  .catch(function(){return fetch(GIST).then(function(r){if(!r.ok)throw 0;return r.text();}).then(function(t){setData(parseCSV(t),'онлайн');});})
+  .catch(function(){$('status').className='status bad';$('status').textContent='Не удалось загрузить данные автоматически.';$('filepick').classList.remove('hidden');});
+}
+$('file').addEventListener('change',function(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(){setData(parseCSV(r.result),f.name);};r.readAsText(f);});
+(function init(){
+  var s=$('to');for(var k in ROUTES){var o=document.createElement('option');o.value=k;o.textContent=ROUTES[k].city;s.appendChild(o);}
+  function sync(){var r=ROUTES[s.value];$('price').value=r.base;$('price').min=r.min;$('price').max=r.max;$('pricehint').textContent='Базовая цена '+fmt(r.base)+' ₽; допустимо '+fmt(r.min)+'–'+fmt(r.max)+' ₽';}
+  s.addEventListener('change',sync);sync();loadData();
+})();
+function showErr(m){var e=$('err');e.textContent=m;e.classList.remove('hidden');$('res').classList.add('hidden');}
+$('go').addEventListener('click',function(){
+  $('err').classList.add('hidden');
+  var key=$('to').value,route=ROUTES[key],date=$('date').value,price=parseFloat($('price').value);
+  if(!Object.keys(DATA).length)return showErr('Данные прогноза ещё не загружены.');
+  if(!date)return showErr('Укажите дату вылета.');
+  if(isNaN(price)||price<=0)return showErr('Введите цену билета — положительное число.');
+  if(price<route.min||price>route.max)return showErr('Цена вне допустимого диапазона: '+fmt(route.min)+'–'+fmt(route.max)+' ₽.');
+  var row=DATA[key+'|'+date];
+  if(!row)return showErr('Для этого рейса и даты нет прогноза (данные есть на 1 июня – 1 июля 2026).');
+  var f=forecast(row,route,price);
+  $('kSeats').textContent=fmt(f.seats);$('kWish').textContent=fmt(f.wish);$('kSales').textContent=fmt(f.sales);
+  var capped=f.wish>f.seats;$('kSalesBox').className='kpi'+(capped?' warn':'');
+  var pa=probAbove(f.w,f.seats);
+  $('note').textContent=(capped?'Спрос выше числа мест — продажи ограничены местами.':f.wish<0?'При такой цене желающих нет — продажи 0.':'Мест хватает на медианный спрос.')+' Вероятность, что спрос превысит число мест: ≈ '+Math.round(pa*100)+'%.';
+  drawChart(f);fillTable(f);$('res').classList.remove('hidden');
+});
+function fillTable(f){
+  var h='<tr><th>Сценарий</th><th>Желают</th><th>Купят</th></tr>',names={1:'0,1 пессимистичный',5:'0,5 медиана',9:'0,9 оптимистичный'};
+  for(var i=0;i<9;i++){var q=i+1,lab=names[q]||('0,'+q);h+='<tr'+(q==5?' style="font-weight:bold"':'')+'><td>'+lab+'</td><td>'+fmt(f.w[i])+'</td><td>'+fmt(Math.min(f.seats,Math.max(0,f.w[i])))+'</td></tr>';}
+  $('tbl').innerHTML=h;
+}
+function drawChart(f){
+  var W=640,H=300,L=20,R=20,T=24,B=52,w=f.w,lo=w[0]-(w[1]-w[0]),hi=w[8]+(w[8]-w[7]),p=[lo].concat(w,[hi]);
+  var xmin=Math.min(p[0],f.seats),xmax=Math.max(p[10],f.seats),pad=(xmax-xmin)*.04;xmin-=pad;xmax+=pad;
+  var X=function(v){return L+(v-xmin)/(xmax-xmin)*(W-L-R);};
+  var dens=[],mx=0;for(var i=0;i<10;i++){var d=.1/Math.max(p[i+1]-p[i],1e-9);dens.push(d);mx=Math.max(mx,d);}
+  var Y=function(d){return H-B-d/mx*(H-B-T);};
+  var s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Распределение спроса"><defs><clipPath id="cp"><rect x="'+X(f.seats)+'" y="0" width="'+W+'" height="'+H+'"/></clipPath></defs>';
+  var bars='';for(i=0;i<10;i++){var tail=(i==0||i==9),x=X(p[i]),wd=X(p[i+1])-x,y=Y(dens[i]);
+    bars+='<rect x="'+x+'" y="'+y+'" width="'+Math.max(wd-1,.5)+'" height="'+(H-B-y)+'" opacity="'+(tail?.4:1)+'"><title>'+fmt(p[i])+'–'+fmt(p[i+1])+' чел.: вероятность 10%</title></rect>';}
+  s+='<g fill="#5b9bd5">'+bars+'</g><g fill="#e04b3c" clip-path="url(#cp)">'+bars+'</g>';
+  s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+(H-B)+'" y2="'+(H-B)+'" stroke="#555"/>';
+  for(i=0;i<=5;i++){var v=xmin+(xmax-xmin)*i/5;s+='<text x="'+X(v)+'" y="'+(H-B+20)+'" font-size="15" text-anchor="middle" fill="#444">'+fmt(v)+'</text>';}
+  s+='<text x="'+(W/2)+'" y="'+(H-6)+'" font-size="15" text-anchor="middle" fill="#444">Спрос при введённой цене (число желающих)</text>';
+  s+='<line x1="'+X(f.wish)+'" x2="'+X(f.wish)+'" y1="'+T+'" y2="'+(H-B)+'" stroke="#111" stroke-width="2" stroke-dasharray="5 3"/><text x="'+X(f.wish)+'" y="'+(T-8)+'" font-size="15" font-weight="bold" text-anchor="middle">медиана '+fmt(f.wish)+'</text>';
+  var sx=X(f.seats),near=Math.abs(sx-X(f.wish))<70;
+  s+='<line x1="'+sx+'" x2="'+sx+'" y1="'+T+'" y2="'+(H-B)+'" stroke="#c0392b" stroke-width="2"/><text x="'+sx+'" y="'+(near?T+10:T-8)+'" font-size="15" font-weight="bold" fill="#c0392b" text-anchor="'+(sx>X(f.wish)?'start':'end')+'" dx="'+(near?(sx>X(f.wish)?6:-6):0)+'">мест '+fmt(f.seats)+'</text></svg>';
+  $('chart').innerHTML=s;
+}
+</script>
+</body>
+</html>
